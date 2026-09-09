@@ -2,7 +2,8 @@ services:
   - type: pserv
     name: vet-postgres
     env: docker
-    image: postgres:15-alpine
+    image:
+      url: postgres:15-alpine
     plan: free
     envVars:
       - key: POSTGRES_DB
@@ -19,7 +20,8 @@ services:
   - type: web
     name: vet-n8n
     env: docker
-    image: n8nio/n8n:latest
+    image:
+      url: n8nio/n8n:latest
     plan: free
     envVars:
       - key: DB_TYPE
@@ -42,7 +44,6 @@ services:
           property: password
       - key: WEBHOOK_URL
         value: https://vet-n8n.onrender.com
-        # замени на твой URL после создания
       - key: GENERIC_TIMEZONE
         value: Europe/Moscow
     healthCheckPath: /healthz
@@ -50,7 +51,8 @@ services:
   - type: web
     name: vet-evolution
     env: docker
-    image: atendai/evolution-api:latest
+    image:
+      url: atendai/evolution-api:latest
     plan: free
     envVars:
       - key: AUTHENTICATION_TYPE
