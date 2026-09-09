@@ -29,14 +29,35 @@ async function getGigaToken() {
   return resp.data.access_token;
 }
 
+function safeParse(content) {
+  try {
+    // пробуем напрямую
+    return JSON.parse(content);
+  } catch {}
+  try {
+    // убираем ```json ```
+    const cleaned = content.replace(/```json|```/g,'').trim();
+    return JSON.parse(cleaned);
+  } catch {}
+  try {
+    const m = content.match(/\{[\s\S]*\}/);
+    if (m) {
+      // фиксим одинарные кавычки и перенос строк
+      let j = m[0].replace(/'/g,'"').replace(/\n/g,' ').replace(/,\s*}/g,'}').replace(/,\s*]/g,']');
+      return JSON.parse(j);
+    }
+  } catch (e) { console.error('safeParse fail', content.slice(0,300)); }
+  return null;
+}
+
 async function parseWithGiga(text, history) {
   const token = await getGigaToken();
-  const system = `Ты админ вет-клиники. Извлеки из диалога 9 полей: pet_type(кошка/собака), breed, name(кличка), age, weight, symptoms, address, last_visit, vaccinated. Верни ТОЛЬКО JSON вида {"pet_type":"","breed":"","name":"","age":"","weight":"","symptoms":"","address":"","last_visit":"","vaccinated":"","all_filled":true/false,"reply":"твой ответ клиенту на русском, задай только ОДИН недостающий вопрос"}. Не ставь диагноз. Если все поля есть - all_filled=true и reply="Спасибо, передал данные врачу, скоро свяжемся". История: ${history}`;
+  const system = `Ты админ вет-клиники. Извлеки 9 полей: pet_type(кошка/собака), breed, name(кличка), age, weight, symptoms, address, last_visit, vaccinated. Верни ТОЛЬКО валидный JSON без пояснений: {"pet_type":"","breed":"","name":"","age":"","weight":"","symptoms":"","address":"","last_visit":"","vaccinated":"","all_filled":false,"reply":"твой ответ"}. all_filled=true если все 9 полей непустые. reply - один вопрос на русском что спросить дальше, или "Спасибо, передал данные врачу" если all_filled. Отвечай строго JSON с двойными кавычками. История: ${history}`;
   const resp = await axios.post('https://gigachat.devices.sberbank.ru/api/v1/chat/completions',
     {
       model: 'GigaChat',
       messages: [{ role: 'system', content: system }, { role: 'user', content: text }],
-      temperature: 0.3
+      temperature: 0.1
     },
     {
       headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -44,49 +65,38 @@ async function parseWithGiga(text, history) {
     }
   );
   const content = resp.data.choices[0].message.content;
-  try { return JSON.parse(content); } catch {
-    const m = content.match(/\{[\s\S]*\}/);
-    return JSON.parse(m[0]);
+  let parsed = safeParse(content);
+  if (!parsed) {
+    console.error('GigaChat bad JSON:', content);
+    // фолбэк - считаем неполным
+    return { pet_type:'', breed:'', name:'', age:'', weight:'', symptoms: text, address:'', last_visit:'', vaccinated:'', all_filled:false, reply:'Пожалуйста, уточните породу, кличку, возраст, вес и адрес' };
   }
+  return parsed;
 }
 
 async function startSock() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
   const { version } = await fetchLatestBaileysVersion();
-  sock = makeWASocket({
-    version,
-    auth: state,
-    printQRInTerminal: false
-  });
-
+  sock = makeWASocket({ version, auth: state, printQRInTerminal: false });
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
-    if (qr) {
-      qrData = await QRCode.toDataURL(qr);
-      console.log('QR updated');
-    }
+    if (qr) qrData = await QRCode.toDataURL(qr);
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       if (shouldReconnect) startSock();
-    } else if (connection === 'open') {
-      console.log('WhatsApp connected');
-      qrData = 'connected';
-    }
+    } else if (connection === 'open') { console.log('WhatsApp connected'); qrData = 'connected'; }
   });
   sock.ev.on('creds.update', saveCreds);
-
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const m of messages) {
       if (!m.message || m.key.fromMe) continue;
       const chatId = m.key.remoteJid;
-      if (chatId.endsWith('@g.us')) continue; // игнор групп
+      if (chatId.endsWith('@g.us')) continue;
       const text = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || '';
       if (!text) continue;
-
       if (!sessions.has(chatId)) sessions.set(chatId, { history: '' });
       const sess = sessions.get(chatId);
       sess.history += `\nКлиент: ${text}`;
-
       try {
         const parsed = await parseWithGiga(text, sess.history);
         sess.history += `\nБот: ${parsed.reply}`;
@@ -98,18 +108,17 @@ async function startSock() {
         }
       } catch (e) {
         console.error(e.response?.data || e.message);
-        await sock.sendMessage(chatId, { text: 'Принято, передам врачу.' });
+        try { await sock.sendMessage(chatId, { text: 'Принято, уточните пожалуйста породу и вес' }); } catch {}
       }
     }
   });
 }
 startSock();
-
 app.get('/', (req,res)=> res.send('vet-bot Baileys OK <a href="/qr">QR</a>'));
 app.get('/healthz', (req,res)=> res.send('ok'));
 app.get('/qr', (req,res)=>{
   if (!qrData) return res.send('QR not yet generated, refresh in 5 sec');
   if (qrData==='connected') return res.send('<h2>WhatsApp подключен ✅</h2>');
-  res.send(`<h2>Отсканируй QR в WhatsApp -> Связанные устройства</h2><img src="${qrData}" style="width:300px"/><br/><a href="/qr">Обновить</a><script>setTimeout(()=>location.reload(),5000)</script>`);
+  res.send(`<h2>Отсканируй QR</h2><img src="${qrData}" style="width:300px"/><br/><a href="/qr">Обновить</a><script>setTimeout(()=>location.reload(),5000)</script>`);
 });
 app.listen(PORT, ()=> console.log(`listening ${PORT}`));
