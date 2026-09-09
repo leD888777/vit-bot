@@ -1,20 +1,20 @@
 import express from 'express';
 import axios from 'axios';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import QRCode from 'qrcode';
+import fs from 'fs';
 
 const app = express();
 app.use(express.json());
-
 const PORT = process.env.PORT || 10000;
-const GREEN_ID = process.env.GREEN_API_ID || '720122732545';
-const GREEN_TOKEN = process.env.GREEN_API_TOKEN || '';
-const GREEN_GROUP = process.env.GREEN_GROUP_ID || ''; // вида 1203...@g.us
-const GIGACHAT_AUTH = process.env.GIGACHAT_AUTH || ''; // Base64 ClientID:ClientSecret
+const GREEN_GROUP = process.env.GREEN_GROUP_ID || '120363430474979745@g.us';
+const GIGACHAT_AUTH = process.env.GIGACHAT_AUTH || 'MDFhMDg2Y2UtYWM5OS03Nzg4LThjODktNDU4NDNlYzQ1MmIzOmU0YjUzMDIwLTk0MzktNGI0NC05YTQ0LTI0MTc1MjRiMGJiOA==';
 
-// память по чатам
+let qrData = '';
+let sock = null;
 const sessions = new Map();
 
 async function getGigaToken() {
-  if (!GIGACHAT_AUTH) throw new Error('GIGACHAT_AUTH not set');
   const resp = await axios.post('https://ngw.devices.sberbank.ru:9443/api/v2/oauth',
     'scope=GIGACHAT_API_PERS',
     {
@@ -44,55 +44,72 @@ async function parseWithGiga(text, history) {
     }
   );
   const content = resp.data.choices[0].message.content;
-  try { return JSON.parse(content); } catch { // если модель вернула с \`\`\`
+  try { return JSON.parse(content); } catch {
     const m = content.match(/\{[\s\S]*\}/);
     return JSON.parse(m[0]);
   }
 }
 
-async function sendGreen(chatId, message) {
-  const url = `https://api.green-api.com/waInstance${GREEN_ID}/sendMessage/${GREEN_TOKEN}`;
-  await axios.post(url, { chatId, message });
-}
+async function startSock() {
+  const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
+  const { version } = await fetchLatestBaileysVersion();
+  sock = makeWASocket({
+    version,
+    auth: state,
+    printQRInTerminal: false
+  });
 
-app.get('/', (req, res) => res.send('vet-bot light OK'));
-app.get('/healthz', (req, res) => res.send('ok'));
-
-app.post('/webhook/whatsapp-vet', async (req, res) => {
-  try {
-    const body = req.body;
-    // Green API формат
-    const chatId = body?.senderData?.chatId || body?.senderData?.sender;
-    const sender = body?.senderData?.sender;
-    const text = body?.messageData?.textMessageData?.textMessage || body?.messageData?.extendedTextMessageData?.text || '';
-    if (!chatId || !text) return res.sendStatus(200);
-    if (chatId.endsWith('@g.us')) return res.sendStatus(200); // игнор групп
-
-    if (!sessions.has(chatId)) sessions.set(chatId, { history: '', data: {} });
-    const sess = sessions.get(chatId);
-    sess.history += `\nКлиент: ${text}`;
-
-    const parsed = await parseWithGiga(sess.history, sess.history);
-
-    // обновляем сессию
-    sess.history += `\nБот: ${parsed.reply}`;
-    Object.assign(sess.data, parsed);
-
-    // отвечаем клиенту
-    await sendGreen(chatId, parsed.reply);
-
-    // если все собрано - шлем в группу врачей
-    if (parsed.all_filled && GREEN_GROUP) {
-      const msg = `🚨 НОВАЯ ЗАЯВКА\nВид: ${parsed.pet_type} ${parsed.breed}\nКличка: ${parsed.name} | ${parsed.age} | ${parsed.weight}\nСимптомы: ${parsed.symptoms}\nАдрес: ${parsed.address}\nБыл у врача: ${parsed.last_visit}\nПривит: ${parsed.vaccinated}\nКлиент: ${chatId.replace('@c.us','')} ${sender||''}`;
-      await sendGreen(GREEN_GROUP, msg);
-      sessions.delete(chatId); // очищаем
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) {
+      qrData = await QRCode.toDataURL(qr);
+      console.log('QR updated');
     }
+    if (connection === 'close') {
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      if (shouldReconnect) startSock();
+    } else if (connection === 'open') {
+      console.log('WhatsApp connected');
+      qrData = 'connected';
+    }
+  });
+  sock.ev.on('creds.update', saveCreds);
 
-    res.sendStatus(200);
-  } catch (e) {
-    console.error(e.response?.data || e.message);
-    res.sendStatus(200);
-  }
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    for (const m of messages) {
+      if (!m.message || m.key.fromMe) continue;
+      const chatId = m.key.remoteJid;
+      if (chatId.endsWith('@g.us')) continue; // игнор групп
+      const text = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || '';
+      if (!text) continue;
+
+      if (!sessions.has(chatId)) sessions.set(chatId, { history: '' });
+      const sess = sessions.get(chatId);
+      sess.history += `\nКлиент: ${text}`;
+
+      try {
+        const parsed = await parseWithGiga(text, sess.history);
+        sess.history += `\nБот: ${parsed.reply}`;
+        await sock.sendMessage(chatId, { text: parsed.reply });
+        if (parsed.all_filled && GREEN_GROUP) {
+          const msg = `🚨 НОВАЯ ЗАЯВКА\nВид: ${parsed.pet_type} ${parsed.breed}\nКличка: ${parsed.name} | ${parsed.age} | ${parsed.weight}\nСимптомы: ${parsed.symptoms}\nАдрес: ${parsed.address}\nБыл у врача: ${parsed.last_visit}\nПривит: ${parsed.vaccinated}\nКлиент: ${chatId.replace('@s.whatsapp.net','')}`;
+          await sock.sendMessage(GREEN_GROUP, { text: msg });
+          sessions.delete(chatId);
+        }
+      } catch (e) {
+        console.error(e.response?.data || e.message);
+        await sock.sendMessage(chatId, { text: 'Принято, передам врачу.' });
+      }
+    }
+  });
+}
+startSock();
+
+app.get('/', (req,res)=> res.send('vet-bot Baileys OK <a href="/qr">QR</a>'));
+app.get('/healthz', (req,res)=> res.send('ok'));
+app.get('/qr', (req,res)=>{
+  if (!qrData) return res.send('QR not yet generated, refresh in 5 sec');
+  if (qrData==='connected') return res.send('<h2>WhatsApp подключен ✅</h2>');
+  res.send(`<h2>Отсканируй QR в WhatsApp -> Связанные устройства</h2><img src="${qrData}" style="width:300px"/><br/><a href="/qr">Обновить</a><script>setTimeout(()=>location.reload(),5000)</script>`);
 });
-
-app.listen(PORT, () => console.log(`vet-bot listening on ${PORT}`));
+app.listen(PORT, ()=> console.log(`listening ${PORT}`));
