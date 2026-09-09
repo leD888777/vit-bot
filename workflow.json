@@ -1,0 +1,123 @@
+{
+  "name": "Vet WhatsApp - GigaChat + Evolution API",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-vet",
+        "responseMode": "responseNode"
+      },
+      "id": "webhook",
+      "name": "Webhook WhatsApp",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [{ "name": "scope", "value": "GIGACHAT_API_PERS" }]
+        },
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Basic ВСТАВЬ_BASE64_CLIENTID:SECRET" },
+            { "name": "RqUID", "value": "={{ $json.rquid || '12345678-1234-1234-1234-123456789012' }}" },
+            { "name": "Content-Type", "value": "application/x-www-form-urlencoded" }
+          ]
+        },
+        "options": { "allowUnauthorizedCerts": true }
+      },
+      "id": "gigachat_auth",
+      "name": "GigaChat Auth",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [400, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "GigaChat"
+            },
+            {
+              "name": "messages",
+              "value": "=[{\"role\":\"system\",\"content\":\"Ты админ вет-клиники. Извлеки из текста клиента 9 полей: pet_type(кошка/собака), breed, name(кличка), age, weight, symptoms, address, last_visit, vaccinated. Верни ТОЛЬКО JSON вида {\\\"pet_type\\\":\\\"\\\",\\\"breed\\\":\\\"\\\",\\\"name\\\":\\\"\\\",\\\"age\\\":\\\"\\\",\\\"weight\\\":\\\"\\\",\\\"symptoms\\\":\\\"\\\",\\\"address\\\":\\\"\\\",\\\"last_visit\\\":\\\"\\\",\\\"vaccinated\\\":\\\"\\\",\\\"all_filled\\\":true/false,\\\"reply\\\":\\\"твой ответ клиенту на русском, задай только ОДИН недостающий вопрос\\\"}. Не ставь диагноз.\"},{\"role\":\"user\",\"content\":\"={{ $json.body.data.message.conversation || $json.body.data.message.extendedTextMessage.text }}\"}]"
+            }
+          ]
+        },
+        "headerParameters": {
+          "parameters": [{ "name": "Authorization", "value": "=Bearer {{ $json.access_token }}" }]
+        },
+        "options": { "allowUnauthorizedCerts": true }
+      },
+      "id": "gigachat_parse",
+      "name": "GigaChat Парсинг",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [700, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.choices[0].message.content.all_filled }}", "value2": true }]
+        }
+      },
+      "id": "if_filled",
+      "name": "IF Все поля собраны?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1000, 0]
+    },
+    {
+      "parameters": {
+        "url": "=https://{{ $json.evo_host }}/message/sendText/{{ $json.evo_instance }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "number", "value": "=ВСТАВЬ_ID_ГРУППЫ_ВРАЧЕЙ@g.us" },
+            {
+              "name": "text",
+              "value": "=🚨 НОВАЯ ЗАЯВКА\nВид: {{ $json.choices[0].message.content.pet_type }} {{ $json.choices[0].message.content.breed }}\nКличка: {{ $json.choices[0].message.content.name }} | {{ $json.choices[0].message.content.age }} | {{ $json.choices[0].message.content.weight }}\nСимптомы: {{ $json.choices[0].message.content.symptoms }}\nАдрес: {{ $json.choices[0].message.content.address }}\nБыл у врача: {{ $json.choices[0].message.content.last_visit }}\nПривит: {{ $json.choices[0].message.content.vaccinated }}\nКлиент: {{ $json.body.data.key.remoteJid }}"
+            }
+          ]
+        },
+        "headerParameters": { "parameters": [{ "name": "apikey", "value": "ВСТАВЬ_EVO_API_KEY" }] }
+      },
+      "id": "send_group",
+      "name": "Отправка в группу врачей",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1300, -200]
+    },
+    {
+      "parameters": {
+        "url": "=https://{{ $json.evo_host }}/message/sendText/{{ $json.evo_instance }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "number", "value": "={{ $json.body.data.key.remoteJid }}" },
+            { "name": "text", "value": "={{ $json.choices[0].message.content.reply }}" }
+          ]
+        },
+        "headerParameters": { "parameters": [{ "name": "apikey", "value": "ВСТАВЬ_EVO_API_KEY" }] }
+      },
+      "id": "send_client",
+      "name": "Ответ клиенту",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1300, 200]
+    }
+  ],
+  "connections": {
+    "Webhook WhatsApp": { "main": [[{ "node": "GigaChat Auth", "type": "main", "index": 0 }]] },
+    "GigaChat Auth": { "main": [[{ "node": "GigaChat Парсинг", "type": "main", "index": 0 }]] },
+    "GigaChat Парсинг": { "main": [[{ "node": "IF Все поля собраны?", "type": "main", "index": 0 }]] },
+    "IF Все поля собраны?": { "main": [[{ "node": "Отправка в группу врачей", "type": "main", "index": 0 }], [{ "node": "Ответ клиенту", "type": "main", "index": 0 }]] }
+  }
+}
