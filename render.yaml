@@ -1,22 +1,4 @@
 services:
-  - type: pserv
-    name: vet-postgres
-    env: docker
-    image:
-      url: postgres:15-alpine
-    plan: free
-    envVars:
-      - key: POSTGRES_DB
-        value: n8n
-      - key: POSTGRES_USER
-        value: n8n
-      - key: POSTGRES_PASSWORD
-        generateValue: true
-    disk:
-      name: pgdata
-      mountPath: /var/lib/postgresql/data
-      sizeGB: 1
-
   - type: web
     name: vet-n8n
     env: docker
@@ -24,30 +6,13 @@ services:
       url: n8nio/n8n:latest
     plan: free
     envVars:
-      - key: DB_TYPE
-        value: postgresdb
-      - key: DB_POSTGRESDB_HOST
-        fromService:
-          name: vet-postgres
-          type: pserv
-          property: host
-      - key: DB_POSTGRESDB_PORT
-        value: 5432
-      - key: DB_POSTGRESDB_DATABASE
-        value: n8n
-      - key: DB_POSTGRESDB_USER
-        value: n8n
-      - key: DB_POSTGRESDB_PASSWORD
-        fromService:
-          name: vet-postgres
-          type: pserv
-          property: password
       - key: WEBHOOK_URL
         value: https://vet-n8n.onrender.com
       - key: GENERIC_TIMEZONE
         value: Europe/Moscow
+      - key: N8N_ENCRYPTION_KEY
+        generateValue: true
     healthCheckPath: /healthz
-
   - type: web
     name: vet-evolution
     env: docker
